@@ -30,6 +30,12 @@ var TcpFlagsCharMap = map[uint16]byte{
 	pkt.TCP_FIN: 'F',
 }
 
+type mysqlPacket struct {
+	Len     int
+	Seq     int
+	Payload []byte
+}
+
 func tcpFlagChar(tcpHdr *pkt.TcpHdr, mask uint16) byte {
 	val := tcpHdr.Flags & mask
 	if val == 0 {
@@ -38,14 +44,19 @@ func tcpFlagChar(tcpHdr *pkt.TcpHdr, mask uint16) byte {
 	return TcpFlagsCharMap[mask]
 }
 
-func handle(serverPort uint16, tcpHdr *pkt.TcpHdr, bytes []byte) {
+func readMySQLRequest(data []byte) {
+	fmt.Println(string(data[5:]))
+}
+
+func handle(serverPort uint16, tcpHdr *pkt.TcpHdr, data []byte) {
 	prefix := ""
 	if tcpHdr.Source == serverPort {
-		prefix = fmt.Sprintf("Rsp(%d) ", len(bytes))
+		prefix = fmt.Sprintf("@ Rsp(%d) ", len(data))
 	}
 	if tcpHdr.Dest == serverPort {
-		prefix = fmt.Sprintf("Req(%d) ", len(bytes))
+		prefix = fmt.Sprintf("# Req(%d) ", len(data))
 	}
+
 	fmt.Printf(prefix+"%c%c%c%c%c%c Seq:%d Ack:%d Win:%d TcpLen:%d\n",
 		tcpFlagChar(tcpHdr, pkt.TCP_URG),
 		tcpFlagChar(tcpHdr, pkt.TCP_ACK),
@@ -55,7 +66,52 @@ func handle(serverPort uint16, tcpHdr *pkt.TcpHdr, bytes []byte) {
 		tcpFlagChar(tcpHdr, pkt.TCP_FIN),
 		tcpHdr.Seq, tcpHdr.AckSeq,
 		tcpHdr.Window, 4*tcpHdr.Doff)
-	fmt.Println(string(bytes))
+
+	if tcpHdr.Dest == serverPort && len(data) > 4 {
+		payload := readPacket(data)
+		fmt.Printf(" [%x] ==> %v\n", payload[0], string(payload[1:]))
+	}
+	if tcpHdr.Source == serverPort && len(data) > 4 {
+		payload := readPacket(data)
+
+		// ColumnDef
+		numCol := int(payload[0])
+		fmt.Println("NumCol:", numCol)
+		data = data[5:]
+		for i := 0; i < numCol; i++ {
+			payload = readPacket(data)
+			fmt.Printf("Col[%d]:\n", i)
+			parseColumnDef(payload)
+			data = data[4+len(payload):]
+		}
+
+		// EOF
+		eof := readPacket(data)
+		data = data[4+len(eof):]
+
+		fmt.Println("RowSets:")
+		// RowSets
+		for {
+			payload := readPacket(data)
+			if payload[0] == 0xfe { // EOF
+				break
+			}
+			fmt.Print("  [ ")
+			row := payload
+			for {
+				str, pos := peakLenStr(row)
+				fmt.Print(str)
+				if pos >= len(row) {
+					break
+				}
+				row = row[pos:]
+				fmt.Print(", ")
+			}
+			fmt.Println(" ]")
+			data = data[4+len(payload):]
+		}
+	}
+	fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
 }
 
 // main uses golibpcap to build a simple tcpdump binary.
